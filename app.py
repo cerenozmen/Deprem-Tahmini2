@@ -58,8 +58,8 @@ ISTANBUL_DISTRICTS = {
 @st.cache_resource
 def load_models():
     try:
-        reg_model = joblib.load('rf_reg_deprem_buyukluk.joblib')
-        clf_model = joblib.load('rf_clf_deprem_olasilik.joblib')
+        reg_model = joblib.load("rf_reg_deprem_buyukluk.joblib")
+        clf_model = joblib.load("rf_clf_deprem_olasilik.joblib")
         return reg_model, clf_model
     except FileNotFoundError as e:
         st.error(
@@ -73,13 +73,15 @@ rf_reg, rf_clf = load_models()
 
 # --- YARDIMCI FONKSİYONLAR ---
 def derive_date_features(selected_date):
+    """Seçilen tarihten modelin ihtiyaç duyduğu özellikleri çıkarır."""
     return {
         "month": selected_date.month,
         "dow": selected_date.weekday(),  # 0=Pazartesi
-        "dayofyear": selected_date.timetuple().tm_yday
+        "dayofyear": selected_date.timetuple().tm_yday,
     }
 
 def district_to_latlon(district_name: str):
+    """İlçe adından lat/lon döndürür."""
     return ISTANBUL_DISTRICTS.get(district_name, (41.000, 29.000))
 
 def align_features_to_model(df: pd.DataFrame, model, label: str = "") -> pd.DataFrame:
@@ -113,7 +115,6 @@ def align_features_to_model(df: pd.DataFrame, model, label: str = "") -> pd.Data
     for c in missing:
         df[c] = 0.0
 
-    # sadece expected kolonları tut ve sıralamayı düzelt
     df = df[[c for c in df.columns if c in expected]]
     df = df[expected]
 
@@ -123,16 +124,19 @@ def align_features_to_model(df: pd.DataFrame, model, label: str = "") -> pd.Data
     return df
 
 def clamp(x: np.ndarray, lo: float, hi: float) -> np.ndarray:
+    """Tahminleri mantıklı aralığa kırpar (demo güvenliği)."""
     return np.clip(x, lo, hi)
 
 # --- ARAYÜZ ---
 st.title("🌍 İstanbul Deprem Analiz ve Tahmin Paneli")
 st.markdown("Bu uygulama, makine öğrenmesi modelleri kullanarak deprem büyüklüğü tahmini ve risk analizi yapar.")
 
-tab1, tab2 = st.tabs(["📉 Deprem Büyüklüğü Tahmini (Regresyon)", "⚠️ Bölgesel Risk Analizi (Sınıflandırma)"])
+tab1, tab2 = st.tabs(
+    ["📉 Deprem Büyüklüğü Tahmini (Regresyon)", "⚠️ Bölgesel Risk Analizi (Sınıflandırma)"]
+)
 
 # ---------------------------------------------------------
-# TAB 1: REGRESYON
+# TAB 1: REGRESYON (BÜYÜKLÜK TAHMİNİ) + 7 GÜNLÜK TAHMİN
 # ---------------------------------------------------------
 with tab1:
     st.header("Senaryo Bazlı Büyüklük Tahmini")
@@ -146,13 +150,20 @@ with tab1:
             district = st.selectbox("İlçe Seçin", options=sorted(ISTANBUL_DISTRICTS.keys()))
             input_lat, input_lon = district_to_latlon(district)
             st.caption(f"İlçe merkez koordinatı (otomatik): {input_lat:.3f}, {input_lon:.3f}")
+
             input_depth = st.number_input("Derinlik (km)", value=10.0, min_value=0.0, step=0.5)
             input_date = st.date_input("Başlangıç Tarihi (7 günlük tahmin için)", datetime.date.today())
 
         with col2:
             st.subheader("🌋 Sismik Parametreler")
             input_fault_dist = st.number_input("Fay Hattına Uzaklık (km)", value=5.0, min_value=0.0, step=0.5)
-            input_b_value = st.number_input("b-değeri (Sismik aktivite eğimi)", value=1.0, min_value=0.4, max_value=1.8, step=0.05)
+            input_b_value = st.number_input(
+                "b-değeri (Sismik aktivite eğimi)",
+                value=1.0,
+                min_value=0.4,
+                max_value=1.8,
+                step=0.05,
+            )
             input_log_energy = st.number_input("Log Enerji", value=9.0, step=0.1)
 
         with col3:
@@ -164,56 +175,63 @@ with tab1:
                 input_er30 = st.number_input("Enerji Hızı (30 Gün)", value=100.0, min_value=0.0, step=10.0)
                 input_er90 = st.number_input("Enerji Hızı (90 Gün)", value=100.0, min_value=0.0, step=10.0)
 
+                # log1p: eğitimde böyle yaptıysan doğru; değilse eğitimle aynı tanımı kullanmalısın
                 input_log_e30 = np.log1p(input_e30)
                 input_log_e90 = np.log1p(input_e90)
                 input_log_er30 = np.log1p(input_er30)
                 input_log_er90 = np.log1p(input_er90)
 
         st.divider()
-        use_calibration = st.checkbox("Kalibrasyon (demo) uygula: enerji ve b-değerine göre çıktıyı ayarla", value=True)
+        use_calibration = st.checkbox(
+            "Kalibrasyon (demo) uygula: enerji ve b-değerine göre çıktıyı ayarla",
+            value=True,
+        )
         st.caption("Not: Bu kalibrasyon demo amaçlıdır; modeli değiştirmez, yalnızca çıktıyı düzenler.")
 
         if st.button("7 Günlük Büyüklük Tahmini", type="primary"):
             try:
                 dates = [input_date + datetime.timedelta(days=i) for i in range(7)]
+
                 rows = []
                 for d in dates:
                     date_feats = derive_date_features(d)
-                    rows.append({
-                        "lat": input_lat,
-                        "lon": input_lon,
-                        "depth_km": input_depth,
-                        "fault_distance": input_fault_dist,
-                        "b_value": input_b_value,
-                        "log_energy": input_log_energy,
-                        "energy_30d": input_e30,
-                        "energy_rate_30d": input_er30,
-                        "energy_90d": input_e90,
-                        "energy_rate_90d": input_er90,
-                        "log_energy_30d": input_log_e30,
-                        "log_energy_90d": input_log_e90,
-                        "log_energy_rate_30d": input_log_er30,
-                        "log_energy_rate_90d": input_log_er90,
-                        "month": date_feats["month"],
-                        "dow": date_feats["dow"],
-                        "dayofyear": date_feats["dayofyear"]
-                    })
+                    rows.append(
+                        {
+                            "lat": input_lat,
+                            "lon": input_lon,
+                            "depth_km": input_depth,
+                            "fault_distance": input_fault_dist,
+                            "b_value": input_b_value,
+                            "log_energy": input_log_energy,
+                            "energy_30d": input_e30,
+                            "energy_rate_30d": input_er30,
+                            "energy_90d": input_e90,
+                            "energy_rate_90d": input_er90,
+                            "log_energy_30d": input_log_e30,
+                            "log_energy_90d": input_log_e90,
+                            "log_energy_rate_30d": input_log_er30,
+                            "log_energy_rate_90d": input_log_er90,
+                            "month": date_feats["month"],
+                            "dow": date_feats["dow"],
+                            "dayofyear": date_feats["dayofyear"],
+                        }
+                    )
 
                 input_df = pd.DataFrame(rows)
+
+                # ✅ KRİTİK: Feature isim/sırasına hizala
                 input_df = align_features_to_model(input_df, rf_reg, label="REG")
 
                 preds = np.array(rf_reg.predict(input_df), dtype=float)
 
+                # ✅ KALİBRASYON (DEMO)
                 if use_calibration:
                     preds_adj = preds + 0.45 * (input_log_energy - 8.0) - 0.3 * (input_b_value - 1.0)
                     preds_final = clamp(preds_adj, 2.0, 8.0)
                 else:
                     preds_final = clamp(preds, 2.0, 8.0)
 
-                out = pd.DataFrame({
-                    "Tarih": dates,
-                    "Tahmini Mw": np.round(preds_final, 2),
-                })
+                out = pd.DataFrame({"Tarih": dates, "Tahmini Mw": np.round(preds_final, 2)})
 
                 st.success("7 günlük tahmin başarıyla tamamlandı!")
                 st.dataframe(out, use_container_width=True)
@@ -235,9 +253,10 @@ with tab1:
 
             except Exception as e:
                 st.error(f"Bir hata oluştu: {e}")
+                st.write("Lütfen modelin feature isim/sıralamasının kod ile eşleştiğinden emin olun.")
 
 # ---------------------------------------------------------
-# TAB 2: SINIFLANDIRMA (RİSK ANALİZİ)
+# TAB 2: SINIFLANDIRMA (RİSK ANALİZİ) + 7 GÜNLÜK RİSK
 # ---------------------------------------------------------
 with tab2:
     st.header("Bölgesel Deprem Olasılığı (M ≥ 3.0)")
@@ -248,7 +267,9 @@ with tab2:
 
         with c1:
             st.subheader("Konum Bilgileri")
-            c_district = st.selectbox("İlçe Seçin", options=sorted(ISTANBUL_DISTRICTS.keys()), key="c_district")
+            c_district = st.selectbox(
+                "İlçe Seçin", options=sorted(ISTANBUL_DISTRICTS.keys()), key="c_district"
+            )
             c_lat, c_lon = district_to_latlon(c_district)
             st.caption(f"İlçe merkez koordinatı (otomatik): {c_lat:.3f}, {c_lon:.3f}")
 
@@ -268,60 +289,58 @@ with tab2:
             roll30_energy = st.number_input("Son 30 gün enerji", value=1000.0, min_value=0.0, step=100.0)
             roll30_energy_rate = st.number_input("Son 30 gün enerji hızı", value=10.0, min_value=0.0, step=1.0)
 
-        c_date_input = st.date_input("Başlangıç Tarihi (7 günlük risk için)", datetime.date.today(), key="c_date")
-
-        # ✅ İsteğe bağlı debug anahtarı
-        debug_inputs = st.checkbox("Debug: modele giden input satırını göster", value=False)
+        c_date_input = st.date_input(
+            "Başlangıç Tarihi (7 günlük risk için)",
+            datetime.date.today(),
+            key="c_date",
+        )
 
         if st.button("7 Günlük Risk Hesapla", type="primary"):
             try:
                 dates = [c_date_input + datetime.timedelta(days=i) for i in range(7)]
+
                 rows = []
                 for d in dates:
                     feats = derive_date_features(d)
-                    rows.append({
-                        "lat_bin": lat_bin,
-                        "lon_bin": lon_bin,
-                        "roll30_count": roll30_count,
-                        "roll30_maxmag": roll30_maxmag,
-                        "roll30_meanmag": roll30_meanmag,
-                        "roll30_depth": roll30_depth,
-                        "roll30_energy_30d": roll30_energy,
-                        "roll30_energy_rate_30d": roll30_energy_rate,
-                        "month": feats["month"],
-                        "dow": feats["dow"],
-                        "dayofyear": feats["dayofyear"]
-                    })
+                    rows.append(
+                        {
+                            "lat_bin": lat_bin,
+                            "lon_bin": lon_bin,
+                            "roll30_count": roll30_count,
+                            "roll30_maxmag": roll30_maxmag,
+                            "roll30_meanmag": roll30_meanmag,
+                            "roll30_depth": roll30_depth,
+                            "roll30_energy_30d": roll30_energy,
+                            "roll30_energy_rate_30d": roll30_energy_rate,
+                            "month": feats["month"],
+                            "dow": feats["dow"],
+                            "dayofyear": feats["dayofyear"],
+                        }
+                    )
 
                 clf_input = pd.DataFrame(rows)
-                clf_input = align_features_to_model(clf_input, rf_clf, label="CLF")
 
-                if debug_inputs:
-                    st.write("✅ Modele giden ilk satır:", clf_input.iloc[0].to_dict())
-                    st.write("✅ Model beklenen kolonlar:", list(getattr(rf_clf, "feature_names_in_", [])))
+                # ✅ KRİTİK: Feature isim/sırasına hizala
+                clf_input = align_features_to_model(clf_input, rf_clf, label="CLF")
 
                 probs = rf_clf.predict_proba(clf_input)[:, 1]
 
-                out = pd.DataFrame({
-                    "Tarih": dates,
-                    "Olasılık (M≥3.0)": np.round(probs, 4),
-                    "Yüzde": np.round(probs * 100, 2)
-                })
+                out = pd.DataFrame(
+                    {
+                        "Tarih": dates,
+                        "Olasılık (M≥3.0)": np.round(probs, 4),
+                        "Yüzde": np.round(probs * 100, 2),
+                    }
+                )
 
                 st.success("7 günlük risk analizi tamamlandı!")
+                st.dataframe(out, use_container_width=True)
 
-                # ✅ Tek tahmin kartı (Bugün + 7 gün max)
-                today_prob = float(probs[0])
                 max_prob = float(np.max(probs))
-                max_day = dates[int(np.argmax(probs))]
+                st.divider()
+                st.subheader(f"Hafta içi en yüksek olasılık: %{max_prob*100:.2f}")
+                st.progress(max_prob)
 
-                m1, m2 = st.columns(2)
-                with m1:
-                    st.metric("Bugün olasılık (M≥3.0)", f"%{today_prob*100:.2f}")
-                with m2:
-                    st.metric("7 gün içi en yüksek olasılık", f"%{max_prob*100:.2f}", delta=f"Tarih: {max_day}")
-
-                # Etiket
                 if max_prob > 0.7:
                     st.error("Yüksek Risk!")
                 elif max_prob > 0.4:
@@ -329,12 +348,8 @@ with tab2:
                 else:
                     st.success("Düşük Risk")
 
-                st.dataframe(out, use_container_width=True)
-
-                st.divider()
-                st.progress(max_prob)
-
-                st.line_chart(out.set_index("Tarih")[["Yüzde"]])
+                chart_df = out.set_index("Tarih")[["Yüzde"]]
+                st.line_chart(chart_df)
 
             except Exception as e:
                 st.error(f"Sınıflandırma hatası: {e}")
