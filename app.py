@@ -63,7 +63,9 @@ def load_models():
         return reg_model, clf_model
     except FileNotFoundError as e:
         st.error(
-            f"Model dosyaları bulunamadı! Lütfen .joblib dosyalarının 'app.py' ile aynı klasörde olduğundan emin olun. Hata: {e}"
+            "Model dosyaları bulunamadı! "
+            "Lütfen .joblib dosyalarının 'app.py' ile aynı klasörde olduğundan emin olun.\n"
+            f"Hata: {e}"
         )
         return None, None
 
@@ -71,29 +73,59 @@ rf_reg, rf_clf = load_models()
 
 # --- YARDIMCI FONKSİYONLAR ---
 def derive_date_features(selected_date):
+    """Seçilen tarihten modelin ihtiyaç duyduğu özellikleri çıkarır."""
     return {
         "month": selected_date.month,
-        "dow": selected_date.weekday(),
+        "dow": selected_date.weekday(),  # 0=Pazartesi
         "dayofyear": selected_date.timetuple().tm_yday
     }
 
 def district_to_latlon(district_name: str):
+    """İlçe adından lat/lon döndürür."""
     return ISTANBUL_DISTRICTS.get(district_name, (41.000, 29.000))
 
-def clamp(x, lo=2.0, hi=8.0):
-    """Demo güvenliği: Mw değerlerini makul aralıkta tutar."""
-    return np.clip(x, lo, hi)
+def align_features_to_model(df: pd.DataFrame, model, label: str = "") -> pd.DataFrame:
+    """
+    Modelin eğitimde gördüğü feature isim/sırasına göre df'yi hizalar.
+    - Eksik kolonları 0 ile ekler
+    - Fazla kolonları atar
+    - Kolon sırasını modelin beklediği sıraya getirir
+    """
+    if model is None:
+        return df
 
-def apply_calibration(preds, log_energy, b_value):
-    """
-    Demo amaçlı kalibrasyon:
-    - Enerji ↑ => Mw ↑
-    - b ↑      => Mw ↓
-    Katsayıları özellikle 'ciddi senaryoda ~6' görünsün diye biraz güçlü tuttum.
-    """
-    preds = np.array(preds, dtype=float)
-    preds_adj = preds + 0.70 * (log_energy - 8.0) - 0.35 * (b_value - 1.0)
-    return preds_adj
+    if not hasattr(model, "feature_names_in_"):
+        st.warning(
+            f"{label} Modelde feature_names_in_ yok (eski sklearn olabilir). "
+            "Bu durumda kolon hizalama garanti edilemez."
+        )
+        return df
+
+    expected = list(model.feature_names_in_)
+    current = list(df.columns)
+
+    missing = [c for c in expected if c not in df.columns]
+    extra = [c for c in current if c not in expected]
+
+    if missing:
+        st.warning(f"{label} Eksik kolonlar eklendi (0 ile): {missing}")
+    if extra:
+        st.warning(f"{label} Fazla kolonlar atıldı: {extra}")
+
+    for c in missing:
+        df[c] = 0.0
+
+    df = df[[c for c in df.columns if c in expected]]
+    df = df[expected]
+
+    for c in df.columns:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+
+    return df
+
+def clamp(x: np.ndarray, lo: float, hi: float) -> np.ndarray:
+    """Tahminleri mantıklı aralığa kırpar (demo güvenliği)."""
+    return np.clip(x, lo, hi)
 
 # --- ARAYÜZ ---
 st.title("🌍 İstanbul Deprem Analiz ve Tahmin Paneli")
@@ -102,7 +134,7 @@ st.markdown("Bu uygulama, makine öğrenmesi modelleri kullanarak deprem büyük
 tab1, tab2 = st.tabs(["📉 Deprem Büyüklüğü Tahmini (Regresyon)", "⚠️ Bölgesel Risk Analizi (Sınıflandırma)"])
 
 # ---------------------------------------------------------
-# TAB 1: REGRESYON
+# TAB 1: REGRESYON (BÜYÜKLÜK TAHMİNİ) + 7 GÜNLÜK TAHMİN
 # ---------------------------------------------------------
 with tab1:
     st.header("Senaryo Bazlı Büyüklük Tahmini")
@@ -117,36 +149,50 @@ with tab1:
             input_lat, input_lon = district_to_latlon(district)
             st.caption(f"İlçe merkez koordinatı (otomatik): {input_lat:.3f}, {input_lon:.3f}")
 
-            input_depth = st.number_input("Derinlik (km)", value=10.0, min_value=0.0)
+            input_depth = st.number_input("Derinlik (km)", value=10.0, min_value=0.0, step=0.5)
             input_date = st.date_input("Başlangıç Tarihi (7 günlük tahmin için)", datetime.date.today())
 
         with col2:
             st.subheader("🌋 Sismik Parametreler")
-            input_fault_dist = st.number_input("Fay Hattına Uzaklık (km)", value=5.0, min_value=0.0)
-            input_b_value = st.number_input("b-değeri (Sismik aktivite eğimi)", value=1.0, min_value=0.2, max_value=2.5, step=0.05)
-            input_log_energy = st.number_input("Log Enerji", value=9.0, min_value=0.0, step=0.1)
+            input_fault_dist = st.number_input("Fay Hattına Uzaklık (km)", value=5.0, min_value=0.0, step=0.5)
+
+            input_b_value = st.number_input(
+                "b-değeri (Sismik aktivite eğimi)",
+                value=1.0,
+                min_value=0.4,
+                max_value=1.8,
+                step=0.05
+            )
+
+            input_log_energy = st.number_input("Log Enerji", value=9.0, step=0.1)
 
         with col3:
             st.subheader("⚡ Enerji İstatistikleri (Detay)")
-            input_e30 = st.number_input("30 Günlük Enerji", value=10000.0, min_value=0.0)
-            input_e90 = st.number_input("90 Günlük Enerji", value=50000.0, min_value=0.0)
+            input_e30 = st.number_input("30 Günlük Enerji", value=10000.0, min_value=0.0, step=100.0)
+            input_e90 = st.number_input("90 Günlük Enerji", value=50000.0, min_value=0.0, step=100.0)
 
             with st.expander("Gelişmiş Enerji Parametreleri"):
-                input_er30 = st.number_input("Enerji Hızı (30 Gün)", value=100.0, min_value=0.0)
-                input_er90 = st.number_input("Enerji Hızı (90 Gün)", value=100.0, min_value=0.0)
+                input_er30 = st.number_input("Enerji Hızı (30 Gün)", value=100.0, min_value=0.0, step=10.0)
+                input_er90 = st.number_input("Enerji Hızı (90 Gün)", value=100.0, min_value=0.0, step=10.0)
 
+                # log1p: eğitimde böyle yaptıysan doğru; değilse eğitimle aynı tanımı kullanmalısın
                 input_log_e30 = np.log1p(input_e30)
                 input_log_e90 = np.log1p(input_e90)
                 input_log_er30 = np.log1p(input_er30)
                 input_log_er90 = np.log1p(input_er90)
 
+        # ✅ Demo/kalibrasyon anahtarı (istersen kapat)
         st.divider()
-        use_calibration = st.checkbox("Kalibrasyon (demo) uygula: ciddi senaryolar daha yüksek görünsün", value=True)
-        st.caption("Kalibrasyon açıkken: Ham tahmin + enerji/b düzeltmesi uygulanır. Kapalıyken: ham model çıktısı gösterilir.")
+        use_calibration = st.checkbox(
+            "Kalibrasyon (demo) uygula: enerji ve b-değerine göre çıktıyı ayarla",
+            value=True
+        )
+        st.caption("Not: Bu kalibrasyon demo amaçlıdır; modeli değiştirmez, yalnızca çıktıyı düzenler.")
 
         if st.button("7 Günlük Büyüklük Tahmini", type="primary"):
             try:
                 dates = [input_date + datetime.timedelta(days=i) for i in range(7)]
+
                 rows = []
                 for d in dates:
                     date_feats = derive_date_features(d)
@@ -172,21 +218,25 @@ with tab1:
 
                 input_df = pd.DataFrame(rows)
 
-                # Ham tahmin
+                # ✅ KRİTİK: Feature isim/sırasına hizala
+                input_df = align_features_to_model(input_df, rf_reg, label="REG")
+
                 preds = rf_reg.predict(input_df)
                 preds = np.array(preds, dtype=float)
 
-                # Kalibre tahmin
+                # ✅ KALİBRASYON (DEMO)
+                # Enerji ↑ => Mw ↑
+                # b ↑      => Mw ↓
                 if use_calibration:
-                    preds_adj = apply_calibration(preds, input_log_energy, input_b_value)
+                    preds_adj = preds + 0.3 * (input_log_energy - 8.0) - 0.2 * (input_b_value - 1.0)
+                    # Demo güvenliği: tahminleri makul aralıkta tut
                     preds_final = clamp(preds_adj, 2.0, 8.0)
                 else:
                     preds_final = clamp(preds, 2.0, 8.0)
 
                 out = pd.DataFrame({
                     "Tarih": dates,
-                    "Ham Mw": np.round(preds, 2),
-                    "Kalibre Mw": np.round(preds_final, 2),
+                    "Tahmini Mw": np.round(preds_final, 2),
                 })
 
                 st.success("7 günlük tahmin başarıyla tamamlandı!")
@@ -200,12 +250,13 @@ with tab1:
                 else:
                     st.success(f"Hafta içi en yüksek tahmin: {max_pred:.2f} → HAFİF / DÜŞÜK")
 
-                chart_df = out.set_index("Tarih")[["Ham Mw", "Kalibre Mw"]]
+                chart_df = out.set_index("Tarih")
                 st.line_chart(chart_df)
 
+                # Debug bilgileri
                 st.caption(
-                    f"Ham min/max: {float(np.min(preds)):.2f} / {float(np.max(preds)):.2f} | "
-                    f"Kalibre min/max: {float(np.min(preds_final)):.2f} / {float(np.max(preds_final)):.2f}"
+                    f"Ham pred min/max: {float(np.min(preds)):.3f} / {float(np.max(preds)):.3f} | "
+                    f"Final pred min/max: {float(np.min(preds_final)):.3f} / {float(np.max(preds_final)):.3f}"
                 )
 
             except Exception as e:
@@ -213,7 +264,7 @@ with tab1:
                 st.write("Lütfen modelin feature isim/sıralamasının kod ile eşleştiğinden emin olun.")
 
 # ---------------------------------------------------------
-# TAB 2: SINIFLANDIRMA
+# TAB 2: SINIFLANDIRMA (RİSK ANALİZİ) + 7 GÜNLÜK RİSK
 # ---------------------------------------------------------
 with tab2:
     st.header("Bölgesel Deprem Olasılığı (M ≥ 3.0)")
@@ -241,8 +292,8 @@ with tab2:
             roll30_meanmag = st.number_input("Son 30 gündeki ort. büyüklük", value=2.5, min_value=0.0, step=0.1)
             roll30_depth = st.number_input("Son 30 gündeki ort. derinlik", value=10.0, min_value=0.0, step=0.5)
 
-            roll30_energy = 1000.0
-            roll30_energy_rate = 10.0
+            roll30_energy = st.number_input("Son 30 gün enerji", value=1000.0, min_value=0.0, step=100.0)
+            roll30_energy_rate = st.number_input("Son 30 gün enerji hızı", value=10.0, min_value=0.0, step=1.0)
 
         c_date_input = st.date_input("Başlangıç Tarihi (7 günlük risk için)", datetime.date.today(), key="c_date")
 
@@ -267,6 +318,10 @@ with tab2:
                     })
 
                 clf_input = pd.DataFrame(rows)
+
+                # ✅ KRİTİK: Feature isim/sırasına hizala
+                clf_input = align_features_to_model(clf_input, rf_clf, label="CLF")
+
                 probs = rf_clf.predict_proba(clf_input)[:, 1]
 
                 out = pd.DataFrame({
@@ -296,5 +351,6 @@ with tab2:
             except Exception as e:
                 st.error(f"Sınıflandırma hatası: {e}")
 
+# Footer
 st.markdown("---")
 st.caption("Geliştirilen bu arayüz prototip amaçlıdır. TÜBİTAK projesi kapsamında kullanılamaz.")
