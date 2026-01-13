@@ -224,7 +224,20 @@ with tab1:
                 preds = rf_reg.predict(input_df)
                 preds = np.array(preds, dtype=float)
 
-              
+                # ✅ KALİBRASYON (DEMO)
+                # Enerji ↑ => Mw ↑
+                # b ↑      => Mw ↓
+                if use_calibration:
+                    preds_adj = preds + 0.3 * (input_log_energy - 8.0) - 0.2 * (input_b_value - 1.0)
+                    # Demo güvenliği: tahminleri makul aralıkta tut
+                    preds_final = clamp(preds_adj, 2.0, 8.0)
+                else:
+                    preds_final = clamp(preds, 2.0, 8.0)
+
+                out = pd.DataFrame({
+                    "Tarih": dates,
+                    "Tahmini Mw": np.round(preds_final, 2),
+                })
 
                 st.success("7 günlük tahmin başarıyla tamamlandı!")
                 st.dataframe(out, use_container_width=True)
