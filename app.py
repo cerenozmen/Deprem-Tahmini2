@@ -92,7 +92,7 @@ def apply_calibration(preds, log_energy, b_value):
     Katsayıları özellikle 'ciddi senaryoda ~6' görünsün diye biraz güçlü tuttum.
     """
     preds = np.array(preds, dtype=float)
-    preds_adj = preds + 0.85 * (log_energy - 8.0) - 0.45 * (b_value - 1.0)
+    preds_adj = preds + 0.70 * (log_energy - 8.0) - 0.35 * (b_value - 1.0)
     return preds_adj
 
 # --- ARAYÜZ ---
