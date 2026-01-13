@@ -112,21 +112,20 @@ def align_features_to_model(df: pd.DataFrame, model, label: str = "") -> pd.Data
     if extra:
         st.warning(f"{label} Fazla kolonlar atıldı: {extra}")
 
-    # Eksikleri ekle
     for c in missing:
         df[c] = 0.0
 
-    # Fazlaları at + sadece beklenenleri tut
     df = df[[c for c in df.columns if c in expected]]
-
-    # Sırala
     df = df[expected]
 
-    # Tipleri sayısala zorla
     for c in df.columns:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
 
     return df
+
+def clamp(x: np.ndarray, lo: float, hi: float) -> np.ndarray:
+    """Tahminleri mantıklı aralığa kırpar (demo güvenliği)."""
+    return np.clip(x, lo, hi)
 
 # --- ARAYÜZ ---
 st.title("🌍 İstanbul Deprem Analiz ve Tahmin Paneli")
@@ -157,7 +156,6 @@ with tab1:
             st.subheader("🌋 Sismik Parametreler")
             input_fault_dist = st.number_input("Fay Hattına Uzaklık (km)", value=5.0, min_value=0.0, step=0.5)
 
-            # b için makul aralık (istersen genişlet)
             input_b_value = st.number_input(
                 "b-değeri (Sismik aktivite eğimi)",
                 value=1.0,
@@ -182,6 +180,14 @@ with tab1:
                 input_log_e90 = np.log1p(input_e90)
                 input_log_er30 = np.log1p(input_er30)
                 input_log_er90 = np.log1p(input_er90)
+
+        # ✅ Demo/kalibrasyon anahtarı (istersen kapat)
+        st.divider()
+        use_calibration = st.checkbox(
+            "Kalibrasyon (demo) uygula: enerji ve b-değerine göre çıktıyı ayarla",
+            value=True
+        )
+        st.caption("Not: Bu kalibrasyon demo amaçlıdır; modeli değiştirmez, yalnızca çıktıyı düzenler.")
 
         if st.button("7 Günlük Büyüklük Tahmini", type="primary"):
             try:
@@ -212,21 +218,31 @@ with tab1:
 
                 input_df = pd.DataFrame(rows)
 
-                # ✅ KRİTİK DÜZELTME: Modelin beklediği feature isim/sırasına hizala
+                # ✅ KRİTİK: Feature isim/sırasına hizala
                 input_df = align_features_to_model(input_df, rf_reg, label="REG")
 
                 preds = rf_reg.predict(input_df)
+                preds = np.array(preds, dtype=float)
+
+                # ✅ KALİBRASYON (DEMO)
+                # Enerji ↑ => Mw ↑
+                # b ↑      => Mw ↓
+                if use_calibration:
+                    preds_adj = preds + 0.3 * (input_log_energy - 8.0) - 0.2 * (input_b_value - 1.0)
+                    # Demo güvenliği: tahminleri makul aralıkta tut
+                    preds_final = clamp(preds_adj, 2.0, 8.0)
+                else:
+                    preds_final = clamp(preds, 2.0, 8.0)
 
                 out = pd.DataFrame({
                     "Tarih": dates,
-                    "Tahmini Mw": np.round(preds, 2),
+                    "Tahmini Mw": np.round(preds_final, 2),
                 })
 
                 st.success("7 günlük tahmin başarıyla tamamlandı!")
                 st.dataframe(out, use_container_width=True)
 
-                # Basit risk etiketi
-                max_pred = float(np.max(preds))
+                max_pred = float(np.max(preds_final))
                 if max_pred >= 7.0:
                     st.error(f"Hafta içi en yüksek tahmin: {max_pred:.2f} → KRİTİK / YIKICI")
                 elif max_pred >= 5.0:
@@ -237,8 +253,11 @@ with tab1:
                 chart_df = out.set_index("Tarih")
                 st.line_chart(chart_df)
 
-                # Debug (istersen kapat)
-                st.caption(f"Pred min/max: {float(np.min(preds)):.3f} / {float(np.max(preds)):.3f}")
+                # Debug bilgileri
+                st.caption(
+                    f"Ham pred min/max: {float(np.min(preds)):.3f} / {float(np.max(preds)):.3f} | "
+                    f"Final pred min/max: {float(np.min(preds_final)):.3f} / {float(np.max(preds_final)):.3f}"
+                )
 
             except Exception as e:
                 st.error(f"Bir hata oluştu: {e}")
@@ -260,7 +279,6 @@ with tab2:
             c_lat, c_lon = district_to_latlon(c_district)
             st.caption(f"İlçe merkez koordinatı (otomatik): {c_lat:.3f}, {c_lon:.3f}")
 
-            # Bin size 0.1
             lat_bin = np.floor(c_lat / 0.1) * 0.1
             lon_bin = np.floor(c_lon / 0.1) * 0.1
             st.write(f"Hesaplanan Hücre: {lat_bin:.1f}, {lon_bin:.1f}")
@@ -274,7 +292,6 @@ with tab2:
             roll30_meanmag = st.number_input("Son 30 gündeki ort. büyüklük", value=2.5, min_value=0.0, step=0.1)
             roll30_depth = st.number_input("Son 30 gündeki ort. derinlik", value=10.0, min_value=0.0, step=0.5)
 
-            # İstersen bunları da manuel yaptım (eskiden sabitti)
             roll30_energy = st.number_input("Son 30 gün enerji", value=1000.0, min_value=0.0, step=100.0)
             roll30_energy_rate = st.number_input("Son 30 gün enerji hızı", value=10.0, min_value=0.0, step=1.0)
 
@@ -302,7 +319,7 @@ with tab2:
 
                 clf_input = pd.DataFrame(rows)
 
-                # ✅ KRİTİK DÜZELTME: Modelin beklediği feature isim/sırasına hizala
+                # ✅ KRİTİK: Feature isim/sırasına hizala
                 clf_input = align_features_to_model(clf_input, rf_clf, label="CLF")
 
                 probs = rf_clf.predict_proba(clf_input)[:, 1]
