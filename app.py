@@ -228,7 +228,7 @@ with tab1:
                 # Enerji ↑ => Mw ↑
                 # b ↑      => Mw ↓
                 if use_calibration:
-                    preds_adj = preds + 0.3 * (input_log_energy - 8.0) - 0.2 * (input_b_value - 1.0)
+                    preds_adj = preds + 0.45 * (input_log_energy - 8.0) - 0.3 * (input_b_value - 1.0)
                     # Demo güvenliği: tahminleri makul aralıkta tut
                     preds_final = clamp(preds_adj, 2.0, 8.0)
                 else:
