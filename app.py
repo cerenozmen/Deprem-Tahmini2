@@ -62,7 +62,11 @@ def load_models():
         clf_model = joblib.load('rf_clf_deprem_olasilik.joblib')
         return reg_model, clf_model
     except FileNotFoundError as e:
-        st.error(f"Model dosyaları bulunamadı! Lütfen .joblib dosyalarının 'app.py' ile aynı klasörde olduğundan emin olun. Hata: {e}")
+        st.error(
+            "Model dosyaları bulunamadı! "
+            "Lütfen .joblib dosyalarının 'app.py' ile aynı klasörde olduğundan emin olun.\n"
+            f"Hata: {e}"
+        )
         return None, None
 
 rf_reg, rf_clf = load_models()
@@ -79,6 +83,50 @@ def derive_date_features(selected_date):
 def district_to_latlon(district_name: str):
     """İlçe adından lat/lon döndürür."""
     return ISTANBUL_DISTRICTS.get(district_name, (41.000, 29.000))
+
+def align_features_to_model(df: pd.DataFrame, model, label: str = "") -> pd.DataFrame:
+    """
+    Modelin eğitimde gördüğü feature isim/sırasına göre df'yi hizalar.
+    - Eksik kolonları 0 ile ekler
+    - Fazla kolonları atar
+    - Kolon sırasını modelin beklediği sıraya getirir
+    """
+    if model is None:
+        return df
+
+    if not hasattr(model, "feature_names_in_"):
+        st.warning(
+            f"{label} Modelde feature_names_in_ yok (eski sklearn olabilir). "
+            "Bu durumda kolon hizalama garanti edilemez."
+        )
+        return df
+
+    expected = list(model.feature_names_in_)
+    current = list(df.columns)
+
+    missing = [c for c in expected if c not in df.columns]
+    extra = [c for c in current if c not in expected]
+
+    if missing:
+        st.warning(f"{label} Eksik kolonlar eklendi (0 ile): {missing}")
+    if extra:
+        st.warning(f"{label} Fazla kolonlar atıldı: {extra}")
+
+    # Eksikleri ekle
+    for c in missing:
+        df[c] = 0.0
+
+    # Fazlaları at + sadece beklenenleri tut
+    df = df[[c for c in df.columns if c in expected]]
+
+    # Sırala
+    df = df[expected]
+
+    # Tipleri sayısala zorla
+    for c in df.columns:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+
+    return df
 
 # --- ARAYÜZ ---
 st.title("🌍 İstanbul Deprem Analiz ve Tahmin Paneli")
@@ -102,24 +150,34 @@ with tab1:
             input_lat, input_lon = district_to_latlon(district)
             st.caption(f"İlçe merkez koordinatı (otomatik): {input_lat:.3f}, {input_lon:.3f}")
 
-            input_depth = st.number_input("Derinlik (km)", value=10.0, min_value=0.0)
+            input_depth = st.number_input("Derinlik (km)", value=10.0, min_value=0.0, step=0.5)
             input_date = st.date_input("Başlangıç Tarihi (7 günlük tahmin için)", datetime.date.today())
 
         with col2:
             st.subheader("🌋 Sismik Parametreler")
-            input_fault_dist = st.number_input("Fay Hattına Uzaklık (km)", value=5.0)
-            input_b_value = st.number_input("b-değeri (Sismik aktivite eğimi)", value=1.0)
-            input_log_energy = st.number_input("Log Enerji", value=9.0)
+            input_fault_dist = st.number_input("Fay Hattına Uzaklık (km)", value=5.0, min_value=0.0, step=0.5)
+
+            # b için makul aralık (istersen genişlet)
+            input_b_value = st.number_input(
+                "b-değeri (Sismik aktivite eğimi)",
+                value=1.0,
+                min_value=0.4,
+                max_value=1.8,
+                step=0.05
+            )
+
+            input_log_energy = st.number_input("Log Enerji", value=9.0, step=0.1)
 
         with col3:
             st.subheader("⚡ Enerji İstatistikleri (Detay)")
-            input_e30 = st.number_input("30 Günlük Enerji", value=10000.0)
-            input_e90 = st.number_input("90 Günlük Enerji", value=50000.0)
+            input_e30 = st.number_input("30 Günlük Enerji", value=10000.0, min_value=0.0, step=100.0)
+            input_e90 = st.number_input("90 Günlük Enerji", value=50000.0, min_value=0.0, step=100.0)
 
             with st.expander("Gelişmiş Enerji Parametreleri"):
-                input_er30 = st.number_input("Enerji Hızı (30 Gün)", value=100.0)
-                input_er90 = st.number_input("Enerji Hızı (90 Gün)", value=100.0)
+                input_er30 = st.number_input("Enerji Hızı (30 Gün)", value=100.0, min_value=0.0, step=10.0)
+                input_er90 = st.number_input("Enerji Hızı (90 Gün)", value=100.0, min_value=0.0, step=10.0)
 
+                # log1p: eğitimde böyle yaptıysan doğru; değilse eğitimle aynı tanımı kullanmalısın
                 input_log_e30 = np.log1p(input_e30)
                 input_log_e90 = np.log1p(input_e90)
                 input_log_er30 = np.log1p(input_er30)
@@ -153,6 +211,10 @@ with tab1:
                     })
 
                 input_df = pd.DataFrame(rows)
+
+                # ✅ KRİTİK DÜZELTME: Modelin beklediği feature isim/sırasına hizala
+                input_df = align_features_to_model(input_df, rf_reg, label="REG")
+
                 preds = rf_reg.predict(input_df)
 
                 out = pd.DataFrame({
@@ -174,6 +236,9 @@ with tab1:
 
                 chart_df = out.set_index("Tarih")
                 st.line_chart(chart_df)
+
+                # Debug (istersen kapat)
+                st.caption(f"Pred min/max: {float(np.min(preds)):.3f} / {float(np.max(preds)):.3f}")
 
             except Exception as e:
                 st.error(f"Bir hata oluştu: {e}")
@@ -204,13 +269,14 @@ with tab2:
             st.subheader("Geçmiş 30 Günlük Aktivite")
             st.caption("Bu değerler normalde veri tabanından otomatik çekilir. Senaryo için manuel giriniz.")
 
-            roll30_count = st.number_input("Son 30 gündeki deprem sayısı", value=5.0)
-            roll30_maxmag = st.number_input("Son 30 gündeki maks. büyüklük", value=3.5)
-            roll30_meanmag = st.number_input("Son 30 gündeki ort. büyüklük", value=2.5)
-            roll30_depth = st.number_input("Son 30 gündeki ort. derinlik", value=10.0)
+            roll30_count = st.number_input("Son 30 gündeki deprem sayısı", value=5.0, min_value=0.0, step=1.0)
+            roll30_maxmag = st.number_input("Son 30 gündeki maks. büyüklük", value=3.5, min_value=0.0, step=0.1)
+            roll30_meanmag = st.number_input("Son 30 gündeki ort. büyüklük", value=2.5, min_value=0.0, step=0.1)
+            roll30_depth = st.number_input("Son 30 gündeki ort. derinlik", value=10.0, min_value=0.0, step=0.5)
 
-            roll30_energy = 1000.0
-            roll30_energy_rate = 10.0
+            # İstersen bunları da manuel yaptım (eskiden sabitti)
+            roll30_energy = st.number_input("Son 30 gün enerji", value=1000.0, min_value=0.0, step=100.0)
+            roll30_energy_rate = st.number_input("Son 30 gün enerji hızı", value=10.0, min_value=0.0, step=1.0)
 
         c_date_input = st.date_input("Başlangıç Tarihi (7 günlük risk için)", datetime.date.today(), key="c_date")
 
@@ -235,6 +301,10 @@ with tab2:
                     })
 
                 clf_input = pd.DataFrame(rows)
+
+                # ✅ KRİTİK DÜZELTME: Modelin beklediği feature isim/sırasına hizala
+                clf_input = align_features_to_model(clf_input, rf_clf, label="CLF")
+
                 probs = rf_clf.predict_proba(clf_input)[:, 1]
 
                 out = pd.DataFrame({
